@@ -1,0 +1,264 @@
+// Database schema. Change it here, then run: npm run db:migrate
+// Tables follow the original app's models, plus users, upload batches and an audit log.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Logic {
+  BLACK
+  FLAVOUR
+  MIX_CARTON
+  VARIETY
+}
+
+enum Role {
+  ADMIN
+  PLANNER
+  SUPERVISOR
+  VIEWER
+}
+
+enum PlanKind {
+  WEEK
+  DAY
+}
+
+enum RunStatus {
+  QUEUED
+  RUNNING
+  DONE
+  FAILED
+}
+
+enum IssueKind {
+  HELD
+  UNPLANNED
+  LATER
+}
+
+// ---------------- users & audit ----------------
+
+model User {
+  id           Int        @id @default(autoincrement())
+  email        String     @unique
+  name         String
+  passwordHash String
+  role         Role       @default(VIEWER)
+  active       Boolean    @default(true)
+  createdAt    DateTime   @default(now())
+  auditLogs    AuditLog[]
+  uploads      UploadBatch[]
+  actuals      ProductionActual[]
+}
+
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  userId    Int?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String // e.g. "actual.update", "workCenter.update", "weekPlan.run"
+  entity    String
+  entityId  String?
+  before    Json?
+  after     Json?
+  createdAt DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([createdAt])
+}
+
+// ---------------- masters ----------------
+
+/// A machine line (work centre). Its planning logic is chosen before each week's plan.
+model WorkCenter {
+  id              Int       @id @default(autoincrement())
+  code            String    @unique
+  zone            String    @default("")
+  logic           Logic     @default(BLACK)
+  capPerMin       Float     @default(0) /// tea bags per machine per minute
+  minutesPerShift Int       @default(570)
+  shiftsPerDay    Int       @default(2)
+  daysPerWeek     Int       @default(6)
+  dayEfficiency   Float     @default(1) /// share of capacity the day plan books (0..1)
+  changeoverDay   Boolean   @default(false) /// Premix / Instant Tea: 1 day to switch items
+  flavourGrouping Boolean   @default(false) /// Constanta ENV: plan flavour-wise
+  updatedAt       DateTime  @updatedAt
+  machines        Machine[]
+}
+
+model Machine {
+  id           Int        @id @default(autoincrement())
+  workCenterId Int
+  workCenter   WorkCenter @relation(fields: [workCenterId], references: [id], onDelete: Cascade)
+  machineNo    String
+  sortKey      Int        @default(0)
+  capPerMin    Float? /// overrides the line value
+  active       Boolean    @default(true)
+
+  @@unique([workCenterId, machineNo])
+}
+
+model Item {
+  id          Int     @id @default(autoincrement())
+  name        String  @unique
+  uom         String  @default("CFC")
+  ctnPerCfc   Float   @default(1)
+  tbgsPerCtn  Float   @default(1)
+  flavour     String  @default("")
+  teaType     String  @default("")
+  defaultWc   String  @default("")
+  lastWc      String  @default("") /// routing used by the last week plan
+  isVariety   Boolean @default(false)
+}
+
+// ---------------- uploaded inputs ----------------
+
+model UploadBatch {
+  id         Int      @id @default(autoincrement())
+  kind       String // work_centers / machines / items / orders / stock / pm_arrivals / actuals
+  fileName   String
+  imported   Int      @default(0)
+  errorCount Int      @default(0)
+  errors     Json?
+  userId     Int?
+  user       User?    @relation(fields: [userId], references: [id])
+  createdAt  DateTime @default(now())
+  orders     SalesOrderLine[]
+}
+
+/// Open sales order lines from the latest order upload (each upload replaces the set).
+model SalesOrderLine {
+  id         Int          @id @default(autoincrement())
+  batchId    Int?
+  batch      UploadBatch? @relation(fields: [batchId], references: [id])
+  soNo       String
+  lineNo     String       @default("1")
+  itemName   String
+  qty        Float
+  shipDate   DateTime?    @db.Date /// buyer requested date to ship
+  poDate     DateTime?    @db.Date
+  priority   Int? /// 1 = highest
+  workCenter String       @default("") /// optional routing override
+
+  @@index([soNo])
+}
+
+model Stock {
+  id          Int    @id @default(autoincrement())
+  itemName    String @unique
+  materialQty Float  @default(0) /// cases the warehouse material covers
+  fgQty       Float  @default(0) /// finished stock (deducted for variety packs)
+}
+
+model PmArrival {
+  id          Int      @id @default(autoincrement())
+  itemName    String
+  poNo        String   @default("")
+  arrivalDate DateTime @db.Date
+
+  @@index([itemName])
+}
+
+// ---------------- plan results ----------------
+
+model PlanRun {
+  id         Int       @id @default(autoincrement())
+  kind       PlanKind
+  weekStart  DateTime  @db.Date /// Monday of the production week
+  status     RunStatus @default(QUEUED)
+  trigger    String    @default("manual") /// manual / scheduled
+  note       String    @default("")
+  error      String?
+  version    Int       @default(0) /// bumped on every day-plan recompute (real-time clients)
+  createdAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  /// A day plan is built from one week plan run.
+  weekRunId Int?
+  weekRun   PlanRun?  @relation("DayFromWeek", fields: [weekRunId], references: [id])
+  dayRuns   PlanRun[] @relation("DayFromWeek")
+
+  weekLines  WeekPlanLine[]
+  weekIssues WeekPlanIssue[]
+  dayCells   DayPlanCell[]
+
+  @@index([kind, weekStart])
+}
+
+model WeekPlanLine {
+  id         Int       @id @default(autoincrement())
+  runId      Int
+  run        PlanRun   @relation(fields: [runId], references: [id], onDelete: Cascade)
+  weekIndex  Int /// 0 = production week, 1.. = PM weeks
+  weekStart  DateTime  @db.Date
+  soNo       String
+  lineNo     String
+  itemName   String
+  workCenter String
+  qty        Float
+  tbgs       Float
+  shipDate   DateTime? @db.Date
+  priority   Int?
+  reason     String    @default("")
+
+  @@index([runId, weekIndex])
+}
+
+/// Orders the week plan could not place, with the reason.
+model WeekPlanIssue {
+  id       Int       @id @default(autoincrement())
+  runId    Int
+  run      PlanRun   @relation(fields: [runId], references: [id], onDelete: Cascade)
+  soNo     String
+  itemName String    @default("")
+  qty      Float     @default(0)
+  kind     IssueKind @default(UNPLANNED)
+  reason   String
+
+  @@index([runId])
+}
+
+model DayPlanCell {
+  id          Int     @id @default(autoincrement())
+  runId       Int
+  run         PlanRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  shiftIdx    Int /// 0..11 = Mon A .. Sat B
+  workCenter  String
+  machineNo   String
+  itemName    String  @default("")
+  planned     Float   @default(0)
+  carryIn     Float   @default(0)
+  requisition Float   @default(0)
+  produced    Float?
+  note        String  @default("")
+
+  @@index([runId, shiftIdx])
+  @@index([runId, workCenter])
+}
+
+model ProductionActual {
+  id         Int      @id @default(autoincrement())
+  weekStart  DateTime @db.Date
+  shiftIdx   Int
+  workCenter String
+  machineNo  String
+  itemName   String
+  produced   Float
+  version    Int      @default(0) /// optimistic locking: two supervisors editing one cell
+  enteredById Int?
+  enteredBy  User?    @relation(fields: [enteredById], references: [id])
+  updatedAt  DateTime @updatedAt
+
+  @@unique([weekStart, shiftIdx, workCenter, machineNo, itemName])
+  @@index([weekStart, workCenter])
+}
+
+model AppState {
+  key   String @id
+  value String @default("")
+}

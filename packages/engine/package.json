@@ -1,0 +1,16 @@
+{
+  "name": "@autoplan/engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Week and day planning engines: pure functions, no database or network access",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^3.1.4"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "@autoplan/shared",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Types, validation schemas and real-time event names shared by the web app and the API",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "zod": "^3.25.0"
+  }
+}
